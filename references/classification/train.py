@@ -10,6 +10,7 @@ import torchvision
 import transforms
 import utils
 from sampler import RASampler
+from copy import deepcopy
 from torch import nn
 from torch.utils.data.dataloader import default_collate
 from torchvision.transforms.functional import InterpolationMode
@@ -354,14 +355,23 @@ def main(args):
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             train_sampler.set_epoch(epoch)
+        # for checkpointing initial model
+        if epoch == 0 and args.output_dir:
+            model_initialization = deepcopy(model_without_ddp.state_dict())
         train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, args, model_ema, scaler)
         lr_scheduler.step()
         evaluate(model, criterion, data_loader_test, device=device)
         if model_ema:
             evaluate(model_ema, criterion, data_loader_test, device=device, log_suffix="EMA")
-        if args.output_dir and (epoch + 1) % args.output_freq == 0:
+        if args.output_dir and epoch % args.output_freq == 0:
+            if epoch == 0:
+                # checkpoint initial model state (parameters)
+                model_checkpoint = model_initialization
+                del model_initialization
+            else:
+                model_checkpoint = model_without_ddp.state_dict()
             checkpoint = {
-                "model": model_without_ddp.state_dict(),
+                "model": model_checkpoint,
                 "optimizer": optimizer.state_dict(),
                 "lr_scheduler": lr_scheduler.state_dict(),
                 "epoch": epoch,
@@ -371,7 +381,10 @@ def main(args):
                 checkpoint["model_ema"] = model_ema.state_dict()
             if scaler:
                 checkpoint["scaler"] = scaler.state_dict()
-            utils.save_on_master(checkpoint, os.path.join(args.output_dir, f"model_{epoch}.pth"))
+            if epoch == 0:
+                utils.save_on_master(checkpoint, os.path.join(args.output_dir, "model_init.pth"))
+            else:
+                utils.save_on_master(checkpoint, os.path.join(args.output_dir, f"model_{epoch}.pth"))
             utils.save_on_master(checkpoint, os.path.join(args.output_dir, "checkpoint.pth"))
 
     total_time = time.time() - start_time
